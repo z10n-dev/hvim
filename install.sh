@@ -7,6 +7,9 @@
 # - sichert eine vorhandene Config und kopiert diese Config nach ~/.config/nvim
 # - synchronisiert die Plugins und installiert die LSP-Server headless
 #
+# Optionen:
+#   --pull, -u   Repo vor der Installation per "git pull --ff-only" aktualisieren
+#
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +18,7 @@ BACKUP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvim.bak.$(date +%Y%m%d-%H%M%S)"
 NVIM_MIN="0.11"
 NVIM_DIR="$HOME/.local/opt/nvim"
 NVIM_BIN="$HOME/.local/bin/nvim"
+NVIM=""
 
 # ---------------------------------------------------------------------------
 # Hilfsfunktionen
@@ -39,6 +43,45 @@ nvim_is_ok() {
     v="$(nvim_version)" || return 1
     version_ge "$v" "$NVIM_MIN"
 }
+
+# Traegt ~/.local/bin dauerhaft in die Shell-Configs ein
+persist_local_bin_path() {
+    local marker='# added by hvim install.sh'
+    local line='export PATH="$HOME/.local/bin:$PATH"'
+    local rc
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        [ -e "$rc" ] || continue
+        if ! grep -qF '.local/bin' "$rc"; then
+            printf '\n%s\n%s\n' "$marker" "$line" >> "$rc"
+            log "PATH-Eintrag zu $rc hinzugefuegt."
+        fi
+    done
+}
+
+# Aktualisiert das Repo vor der Installation (optional)
+pull_repo() {
+    if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        warn "--pull angegeben, aber $REPO_DIR ist kein Git-Repo."
+        return
+    fi
+    log "Aktualisiere Repo (git pull --ff-only)..."
+    git -C "$REPO_DIR" pull --ff-only || warn "git pull fehlgeschlagen, nutze vorhandenen Stand."
+}
+
+# ---------------------------------------------------------------------------
+# Kommandozeile
+# ---------------------------------------------------------------------------
+PULL=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --pull|--update|-u) PULL=1 ;;
+        -h|--help)
+            printf 'Verwendung: %s [--pull]\n\n' "$(basename "$0")"
+            printf '  --pull, -u   Repo vor der Installation per "git pull --ff-only" aktualisieren\n'
+            exit 0 ;;
+        *) die "Unbekannte Option: $_arg (siehe --help)" ;;
+    esac
+done
 
 # ---------------------------------------------------------------------------
 # 1. Systemabhaengigkeiten installieren
@@ -101,6 +144,7 @@ install_deps() {
 # ---------------------------------------------------------------------------
 install_nvim() {
     if nvim_is_ok; then
+        NVIM="$(command -v nvim)"
         log "Neovim $(nvim_version) gefunden (>= $NVIM_MIN)."
         return
     fi
@@ -127,12 +171,19 @@ install_nvim() {
     ln -sf "$NVIM_DIR/bin/nvim" "$NVIM_BIN"
     rm -rf "$tmp"
 
+    NVIM="$NVIM_BIN"
     export PATH="$(dirname "$NVIM_BIN"):$PATH"
 
-    if ! nvim_is_ok; then
-        die "Neovim-Installation fehlgeschlagen. Bitte PATH pruefen: $NVIM_BIN"
+    if ! "$NVIM" --version >/dev/null 2>&1; then
+        die "Neovim-Installation fehlgeschlagen. Bitte pruefen: $NVIM_BIN"
     fi
-    log "Neovim $(nvim_version) installiert nach $NVIM_DIR."
+    log "Neovim $("$NVIM" --version | head -n1) installiert nach $NVIM_DIR."
+
+    persist_local_bin_path
+    if ! nvim_is_ok; then
+        warn "'nvim' im PATH zeigt weiterhin auf $(command -v nvim) ($(nvim_version))."
+        warn "Nutze $NVIM_BIN oder starte eine neue Shell (PATH wurde in die Shell-Config eingetragen)."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -163,8 +214,10 @@ install_config() {
 # 4. Plugins synchronisieren und LSP-Server installieren
 # ---------------------------------------------------------------------------
 setup_plugins() {
+    local nvim="${NVIM:-nvim}"
+
     log "Synchronisiere Plugins (lazy.nvim restore)..."
-    nvim --headless "+Lazy! restore" +qa || warn "lazy restore meldete Fehler."
+    "$nvim" --headless "+Lazy! restore" +qa || warn "lazy restore meldete Fehler."
 
     log "Installiere LSP-Server (mason)..."
     local mason_lua
@@ -216,13 +269,14 @@ if not finished then
 end
 LUA
 
-    nvim --headless "+luafile $mason_lua" +qa || warn "mason-Installation meldete Fehler."
+    "$nvim" --headless "+luafile $mason_lua" +qa || warn "mason-Installation meldete Fehler."
     rm -f "$mason_lua"
 }
 
 # ---------------------------------------------------------------------------
 main() {
     log "hvim Installation gestartet (Quelle: $REPO_DIR)"
+    [ "$PULL" -eq 1 ] && pull_repo
     install_deps
     install_nvim
     install_config
@@ -234,11 +288,11 @@ main() {
     if [ -n "${BACKUP_DIR:-}" ] && [ -e "${BACKUP_DIR:-/nonexistent}" ]; then
         printf '  Backup:     %s\n' "$BACKUP_DIR"
     fi
-    printf '  Neovim:     %s\n' "$(command -v nvim)"
+    printf '  Neovim:     %s (%s)\n' "${NVIM:-nvim}" "$("${NVIM:-nvim}" --version | head -n1)"
     printf '\n'
     printf 'Starte Neovim mit: nvim\n'
     if ! printf '%s' ":$PATH:" | grep -q ":$HOME/.local/bin:"; then
-        printf 'Hinweis: Fuege %s zum PATH hinzu (z.B. in ~/.bashrc).\n' "$HOME/.local/bin"
+        printf 'Hinweis: Fuer die neue Shell PATH neu laden (z.B. "source ~/.bashrc").\n'
     fi
 }
 
