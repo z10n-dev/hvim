@@ -146,6 +146,10 @@ install_nvim() {
     if nvim_is_ok; then
         NVIM="$(command -v nvim)"
         log "Neovim $(nvim_version) gefunden (>= $NVIM_MIN)."
+        # Liegt das gute nvim in ~/.local/bin, PATH dauerhaft eintragen
+        if [ "$NVIM" = "$NVIM_BIN" ]; then
+            persist_local_bin_path
+        fi
         return
     fi
 
@@ -253,23 +257,38 @@ end
 
 if #pending == 0 then
     vim.notify("Alle LSP-Server bereits installiert.", vim.log.levels.INFO)
+    vim.cmd("qa!")
     return
 end
 
-vim.notify(("Installiere %d LSP-Server..."):format(#pending), vim.log.levels.INFO)
-local finished = vim.wait(900000, function()
+local function all_installed()
     for _, p in ipairs(pending) do
-        if not p:is_installed() then return false end
+        local ok, inst = pcall(function() return p:is_installed() end)
+        if not ok or not inst then return false end
     end
     return true
-end, 500)
-
-if not finished then
-    vim.notify("LSP-Installation nicht abgeschlossen. Beim naechsten Start erneut versuchen.", vim.log.levels.WARN)
 end
+
+vim.notify(("Installiere %d LSP-Server..."):format(#pending), vim.log.levels.INFO)
+
+-- In headless ist vim.wait nicht erlaubt -> Timer im Event-Loop nutzen
+local attempts, max_attempts = 0, 1800 -- 1800 * 1s = 30 min
+local timer = assert(vim.uv.new_timer())
+timer:start(1000, 1000, vim.schedule_wrap(function()
+    attempts = attempts + 1
+    if all_installed() then
+        timer:stop(); timer:close()
+        vim.notify("LSP-Server installiert.", vim.log.levels.INFO)
+        vim.cmd("qa!")
+    elseif attempts >= max_attempts then
+        timer:stop(); timer:close()
+        vim.notify("LSP-Installation Timeout. Beim naechsten Start erneut versuchen.", vim.log.levels.WARN)
+        vim.cmd("qa!")
+    end
+end))
 LUA
 
-    "$nvim" --headless "+luafile $mason_lua" +qa || warn "mason-Installation meldete Fehler."
+    "$nvim" --headless "+luafile $mason_lua" || warn "mason-Installation meldete Fehler."
     rm -f "$mason_lua"
 }
 
